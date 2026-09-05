@@ -16,23 +16,24 @@
 #include "pci_enum.h"
 #include "devfs.h"
 #include "sync.h"
+#include "klib.h"
 
-extern void     kprint(char* s);
-extern void     kprint_hex(uint32_t v);
-extern void     klog(int level, const char* msg);
+extern void     printk(const char* fmt, ...);
+extern void     printk_hex(uint32_t v);
+
 extern void*    kmalloc(uint32_t size);
 extern void*    kmalloc_aligned(uint32_t size, uint32_t align);
-extern void     kfree_aligned(void* p);
-extern void     kfree_heap(void* p);
+extern void     kfree(void* p);
+extern void     kfree(void* p);
 extern void*    memset(void* s, int c, uint32_t n);
 extern void*    memcpy(void* dst, const void* src, uint32_t n);
-extern void     itoa(int n, char* str);
-extern void     hex_to_ascii(uint32_t n, char str[]);
-extern uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg);
-extern void     pci_write32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg,
+
+
+extern uint32_t pci_read_config_dword(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg);
+extern void     pci_write_config_dword(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg,
                             uint32_t val);
-extern uint8_t  port_byte_in (uint16_t port);
-extern void     port_byte_out(uint16_t port, uint8_t val);
+extern uint8_t  inb (uint16_t port);
+extern void     outb(uint16_t port, uint8_t val);
 extern void     vmm_map(uint32_t* pd, uint32_t va, uint32_t pa, int flags);
 extern void     irq_spinlock_init   (irq_spinlock_t* lock);
 extern void     irq_spinlock_acquire(irq_spinlock_t* lock);
@@ -57,21 +58,17 @@ extern int      pci_msix_enable(pci_device_t *dev, int vec,
                                 volatile struct msix_table_entry *table,
                                 unsigned int entry_idx);
 extern void     sema_init   (semaphore_t* s, int val);
-extern void     sema_down   (semaphore_t* s);
-extern void     sema_up     (semaphore_t* s);
-extern devfs_entry_t* devfs_register  (const char* name, uint32_t flags,
+extern void     down   (semaphore_t* s);
+extern void     up     (semaphore_t* s);
+extern devfs_entry_t* register_chrdev  (const char* name, uint32_t flags,
                                        devfs_driver_t* drv, void* drv_priv);
-extern int            devfs_unregister(const char* name);
+extern int            unregister_chrdev(const char* name);
 
 #define PAGE_PRESENT 0x1
 #define PAGE_RW      0x2
 #define PAGE_PWT     0x8
 #define PAGE_PCD     0x10
 
-#define KLOG_OK    0
-#define KLOG_WARN  1
-#define KLOG_ERROR 2
-#define KLOG_FAIL  3
 
 static uint32_t          hda_mmio_base;
 static uint32_t          hda_mmio_size;
@@ -146,7 +143,7 @@ static void hda_corb_rirb_init(void) {
     rirb_buf = (uint32_t*)kmalloc_aligned(
                    HDA_RIRB_SIZE * HDA_RIRB_ENTRY_SIZE, 128);
     if (!corb_buf || !rirb_buf) {
-        klog(KLOG_FAIL, "HDA: CORB/RIRB buffer alloc failed");
+        printk("3" "HDA: CORB/RIRB buffer alloc failed");
         return;
     }
     memset(corb_buf, 0, HDA_CORB_SIZE * HDA_CORB_ENTRY_SIZE);
@@ -240,7 +237,7 @@ static uint32_t hda_send_verb(int codec_addr, int node_id,
 
     uint32_t start = hda_reg_read(HDA_WALCLK);
     if (start == 0) {
-        kprint("[HDA] WALCLK is ZERO, IC timeout disabled\n");
+        printk("[HDA] WALCLK is ZERO, IC timeout disabled\n");
     }
     for (int i = 0; i < 500000; i++) {
         __asm__ __volatile__("pause");
@@ -251,13 +248,13 @@ static uint32_t hda_send_verb(int codec_addr, int node_id,
         }
         uint32_t now = hda_reg_read(HDA_WALCLK);
         if (now && (now - start) > 12000000) {
-            kprint("[HDA] IC WALCLK timeout after "); kprint_hex(i); kprint(" iters\n");
+            printk("[HDA] IC WALCLK timeout after "); printk_hex(i); printk(" iters\n");
             break;
         }
     }
 
-    kprint("[HDA] IC timeout: IC="); kprint_hex(hda_reg_read(HDA_IC));
-    kprint(" verb="); kprint_hex(verb); kprint("\n");
+    printk("[HDA] IC timeout: IC="); printk_hex(hda_reg_read(HDA_IC));
+    printk(" verb="); printk_hex(verb); printk("\n");
     return 0xFFFFFFFF;
 }
 
@@ -307,16 +304,16 @@ static void hda_enumerate_codecs(void) {
         hda_codecs[hda_num_codecs].num_widgets  = sub & 0xFF;
 
         char hex[16];
-        itoa(i, hex);
-        kprint("[HDA] codec ");
-        kprint(hex);
-        kprint(": vendor=");
-        hex_to_ascii(hda_codecs[hda_num_codecs].vendor_id, hex);
-        kprint(hex);
-        kprint(" device=");
-        hex_to_ascii(hda_codecs[hda_num_codecs].device_id, hex);
-        kprint(hex);
-        kprint("\n");
+        snprintf(hex, sizeof(hex), "%d", (int)(i));
+        printk("[HDA] codec ");
+        printk(hex);
+        printk(": vendor=");
+        snprintf(hex, sizeof(hex), "0x%x", (unsigned)(hda_codecs[hda_num_codecs].vendor_id));
+        printk(hex);
+        printk(" device=");
+        snprintf(hex, sizeof(hex), "0x%x", (unsigned)(hda_codecs[hda_num_codecs].device_id));
+        printk(hex);
+        printk("\n");
 
         hda_num_codecs++;
     }
@@ -365,7 +362,7 @@ static int hda_setup_pcm_stream(int codec_addr, int converter_node) {
     pcm_bdl    = (hda_bdl_entry_t*)kmalloc_aligned(
                      sizeof(hda_bdl_entry_t) * HDA_BDL_ENTRIES, 4096);
     if (!pcm_buffer || !pcm_bdl) {
-        klog(KLOG_FAIL, "HDA: PCM buffer/BDL alloc failed");
+        printk("3" "HDA: PCM buffer/BDL alloc failed");
         return -1;
     }
     memset(pcm_buffer, 0, HDA_PCM_BUFFER_SIZE);
@@ -401,7 +398,7 @@ static int hda_setup_pcm_stream(int codec_addr, int converter_node) {
     output_configured = 1;
     pcm_codec_addr = codec_addr;
     pcm_output_node = converter_node;
-    klog(KLOG_OK, "HDA: PCM output stream configured (48kHz/16bit)");
+    printk("6" "HDA: PCM output stream configured (48kHz/16bit)");
     return 0;
 }
 
@@ -425,12 +422,12 @@ static int hda_reset_controller(void) {
     }
 
     if (!(hda_reg_read(HDA_GCTL) & HDA_GCTL_CRST)) {
-        klog(KLOG_FAIL, "HDA: controller reset timeout");
+        printk("3" "HDA: controller reset timeout");
         return -1;
     }
 
     hda_udelay(100000);
-    klog(KLOG_OK, "HDA: controller reset OK");
+    printk("6" "HDA: controller reset OK");
     return 0;
 }
 
@@ -448,9 +445,9 @@ static int hda_init_controller(uint32_t mmio, uint32_t mmio_size) {
         uint32_t gcap = hda_reg_read(HDA_GCAP);
         uint32_t dword0c = hda_reg_read(HDA_WAKEEN);
         char hex[16];
-        kprint("[HDA] gcap="); hex_to_ascii(gcap, hex); kprint(hex);
-        kprint(" dword0c="); hex_to_ascii(dword0c, hex); kprint(hex);
-        kprint("\n");
+        printk("[HDA] gcap="); snprintf(hex, sizeof(hex), "0x%x", (unsigned)(gcap)); printk(hex);
+        printk(" dword0c="); snprintf(hex, sizeof(hex), "0x%x", (unsigned)(dword0c)); printk(hex);
+        printk("\n");
     }
 
     corb_buf = 0;
@@ -460,7 +457,7 @@ static int hda_init_controller(uint32_t mmio, uint32_t mmio_size) {
 
     hda_corb_rirb_init();
 
-    klog(KLOG_OK, "HDA: CORB/RIRB initialised");
+    printk("6" "HDA: CORB/RIRB initialised");
 
     {
         uint32_t wake = hda_reg_read(HDA_WAKEEN);
@@ -477,15 +474,15 @@ static int hda_init_controller(uint32_t mmio, uint32_t mmio_size) {
             hda_reg_write(HDA_WAKEEN, (wake & 0x0000FFFF) | ((uint32_t)states << 16));
         }
         if (states == 0) {
-            klog(KLOG_OK, "HDA: STATESTS=0, codecs may be unresponsive");
+            printk("6" "HDA: STATESTS=0, codecs may be unresponsive");
         } else {
-            kprint("[HDA] STATESTS="); kprint_hex(states); kprint("\n");
+            printk("[HDA] STATESTS="); printk_hex(states); printk("\n");
         }
     }
 
     hda_enumerate_codecs();
     if (hda_num_codecs == 0) {
-        klog(KLOG_WARN, "HDA: no codecs detected");
+        printk("4" "HDA: no codecs detected");
         return 0;
     }
 
@@ -493,12 +490,12 @@ static int hda_init_controller(uint32_t mmio, uint32_t mmio_size) {
 
     int output_node = hda_find_pcm_output(hda_codecs[0].addr);
     if (output_node < 0) {
-        klog(KLOG_WARN, "HDA: no PCM output widget found");
+        printk("4" "HDA: no PCM output widget found");
         return 0;
     }
 
     if (hda_setup_pcm_stream(hda_codecs[0].addr, output_node) < 0) {
-        klog(KLOG_WARN, "HDA: PCM stream setup failed");
+        printk("4" "HDA: PCM stream setup failed");
         return 0;
     }
 
@@ -537,7 +534,7 @@ static int _hda_devfs_status(void *p, char *buf, uint32_t size) {
         const char *s1 = "codec_vendor: ";
         int i = 0;
         while (s1[i] && (uint32_t)pos < size - 1) { buf[pos++] = s1[i++]; }
-        hex_to_ascii(hda_codecs[0].vendor_id, hex);
+        snprintf(hex, sizeof(hex), "0x%x", (unsigned)(hda_codecs[0].vendor_id));
         for (i = 0; hex[i] && (uint32_t)pos < size - 1; i++)
             buf[pos++] = hex[i];
         buf[pos++] = '\n';
@@ -545,7 +542,7 @@ static int _hda_devfs_status(void *p, char *buf, uint32_t size) {
         i = 0;
         const char *s2 = "codec_device: ";
         while (s2[i] && (uint32_t)pos < size - 1) { buf[pos++] = s2[i++]; }
-        hex_to_ascii(hda_codecs[0].device_id, hex);
+        snprintf(hex, sizeof(hex), "0x%x", (unsigned)(hda_codecs[0].device_id));
         for (i = 0; hex[i] && (uint32_t)pos < size - 1; i++)
             buf[pos++] = hex[i];
         buf[pos++] = '\n';
@@ -599,7 +596,7 @@ static void hda_detach(void) {
     }
 
     if (devfs_was_registered) {
-        devfs_unregister("hda_audio");
+        unregister_chrdev("hda_audio");
         devfs_was_registered = 0;
     }
 
@@ -611,12 +608,12 @@ static void hda_detach(void) {
     }
 
     if (hda_attached)
-        pci_write32(hda_bus, hda_dev, hda_fn, 0x04, saved_pci_cmd_dw);
+        pci_write_config_dword(hda_bus, hda_dev, hda_fn, 0x04, saved_pci_cmd_dw);
 
-    if (pcm_buffer) { kfree_aligned(pcm_buffer); pcm_buffer = 0; }
-    if (pcm_bdl)    { kfree_aligned(pcm_bdl);    pcm_bdl    = 0; }
-    if (corb_buf)   { kfree_aligned(corb_buf);   corb_buf   = 0; }
-    if (rirb_buf)   { kfree_aligned(rirb_buf);   rirb_buf   = 0; }
+    if (pcm_buffer) { kfree(pcm_buffer); pcm_buffer = 0; }
+    if (pcm_bdl)    { kfree(pcm_bdl);    pcm_bdl    = 0; }
+    if (corb_buf)   { kfree(corb_buf);   corb_buf   = 0; }
+    if (rirb_buf)   { kfree(rirb_buf);   rirb_buf   = 0; }
 
     hda_mmio_base   = 0;
     hda_attached    = 0;
@@ -636,16 +633,16 @@ static void hda_isr(void) {
 int pci_driver_probe(pci_device_t *pdev) {
     if (!pdev) return -1;
     if (hda_attached) {
-        kprint("[HDA] already attached, skipping\n");
+        printk("[HDA] already attached, skipping\n");
         return -1;
     }
 
     irq_spinlock_init(&hda_lock);
 
-    kprint("[HDA] probe bus=");
-    kprint_hex(pdev->bus); kprint(" dev="); kprint_hex(pdev->dev);
-    kprint(" fn="); kprint_hex(pdev->fn);
-    kprint(" irq="); kprint_hex(pdev->irq_line); kprint("\n");
+    printk("[HDA] probe bus=");
+    printk_hex(pdev->bus); printk(" dev="); printk_hex(pdev->dev);
+    printk(" fn="); printk_hex(pdev->fn);
+    printk(" irq="); printk_hex(pdev->irq_line); printk("\n");
 
     hda_bus = pdev->bus;
     hda_dev = pdev->dev;
@@ -661,17 +658,17 @@ int pci_driver_probe(pci_device_t *pdev) {
         }
     }
     if (!mmio) {
-        mmio = pci_read32(pdev->bus, pdev->dev, pdev->fn, 0x10) & ~0xFu;
+        mmio = pci_read_config_dword(pdev->bus, pdev->dev, pdev->fn, 0x10) & ~0xFu;
         mmio_size = 0x4000;
     }
-    if (!mmio) { klog(KLOG_FAIL, "HDA: no MMIO BAR"); return -1; }
+    if (!mmio) { printk("3" "HDA: no MMIO BAR"); return -1; }
     if (mmio_size < 0x4000) mmio_size = 0x4000;
 
-    saved_pci_cmd_dw = pci_read32(pdev->bus, pdev->dev, pdev->fn, 0x04);
+    saved_pci_cmd_dw = pci_read_config_dword(pdev->bus, pdev->dev, pdev->fn, 0x04);
     uint32_t cmd = saved_pci_cmd_dw;
     cmd |= 0x06u;
     cmd &= ~(1u << 10);
-    pci_write32(pdev->bus, pdev->dev, pdev->fn, 0x04, cmd);
+    pci_write_config_dword(pdev->bus, pdev->dev, pdev->fn, 0x04, cmd);
 
     {
         volatile struct msix_table_entry *table = NULL;
@@ -686,30 +683,30 @@ int pci_driver_probe(pci_device_t *pdev) {
                 pci_msix_enable(pdev, vec, table, 0);
                 hda_msix_vector = vec;
                 hda_msix_table  = table;
-                klog(KLOG_OK, "HDA: MSI-X enabled");
+                printk("6" "HDA: MSI-X enabled");
             }
         }
-        if (hda_msix_vector < 0) klog(KLOG_WARN, "HDA: MSI-X unavailable");
+        if (hda_msix_vector < 0) printk("4" "HDA: MSI-X unavailable");
     }
 
     if (hda_init_controller(mmio, mmio_size) < 0) {
-        klog(KLOG_FAIL, "HDA: controller init failed");
+        printk("3" "HDA: controller init failed");
         hda_detach();
         return -1;
     }
 
     hda_attached = 1;
 
-    if (devfs_register("hda_audio", DEVFS_F_CHAR, &drv_hda, 0)) {
+    if (register_chrdev("hda_audio", DEVFS_F_CHAR, &drv_hda, 0)) {
         devfs_was_registered = 1;
     } else {
-        klog(KLOG_WARN, "HDA: devfs_register('hda_audio') failed");
+        printk("4" "HDA: register_chrdev('hda_audio') failed");
     }
 
     if (output_configured) {
-        klog(KLOG_OK, "HDA: audio driver attached — /dev/hda_audio (PCM playback)");
+        printk("6" "HDA: audio driver attached — /dev/hda_audio (PCM playback)");
     } else {
-        klog(KLOG_WARN, "HDA: attached but no PCM output — /dev/hda_audio (control only)");
+        printk("4" "HDA: attached but no PCM output — /dev/hda_audio (control only)");
     }
     return 0;
 }
@@ -718,5 +715,5 @@ void pci_driver_remove(pci_device_t *dev) {
     (void)dev;
     int had_any = hda_attached || devfs_was_registered || hda_mmio_base;
     hda_detach();
-    if (had_any) klog(KLOG_OK, "HDA: unloaded");
+    if (had_any) printk("6" "HDA: unloaded");
 }
